@@ -8,7 +8,7 @@
 #define S__LINE__ S_(__LINE__)
 
 
-#if defined(NDEBUG) //|| !defined(__ANDROID__)
+#if defined(NDEBUG)
 
 #define LOGI(...) ((void)0)
 #define LOGD(...) ((void)0)
