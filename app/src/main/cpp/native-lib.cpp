@@ -75,7 +75,7 @@ static const char* vertexShaderSrc = R"(
 
         void main()
         {
-            varUvs = (texMatrix * vec4(uvs.x, uvs.y, 0, 0)).xy;
+            varUvs = (texMatrix * vec4(uvs.x, uvs.y, 0, 1.0)).xy;
             gl_Position = mvp * vec4(vertexPosition, 1.0);
         }
 )";
