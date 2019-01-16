@@ -30,13 +30,23 @@ static ACameraDevice* cameraDevice = nullptr;
 
 static ACameraOutputTarget* textureTarget = nullptr;
 
-static ACaptureRequest* textureRequest = nullptr;
+static ACaptureRequest* request = nullptr;
 
 static ANativeWindow* textureWindow = nullptr;
 
 static ACameraCaptureSession* textureSession = nullptr;
 
 static ACaptureSessionOutput* textureOutput = nullptr;
+
+#ifdef WITH_IMAGE_READER
+static ANativeWindow* imageWindow = nullptr;
+
+static ACameraOutputTarget* imageTarget = nullptr;
+
+static AImageReader* imageReader = nullptr;
+
+static ACaptureSessionOutput* imageOutput = nullptr;
+#endif
 
 static ACaptureSessionOutput* output = nullptr;
 
@@ -134,17 +144,17 @@ static ACameraDevice_stateCallbacks cameraDeviceCallbacks = {
 
 static void onSessionActive(void* context, ACameraCaptureSession *session)
 {
-    LOGD("Session ready");
+    LOGD("onSessionActive()");
 }
 
 static void onSessionReady(void* context, ACameraCaptureSession *session)
 {
-    LOGD("Session ready");
+    LOGD("onSessionReady()");
 }
 
 static void onSessionClosed(void* context, ACameraCaptureSession *session)
 {
-    LOGD("Session closed");
+    LOGD("onSessionClosed()");
 }
 
 static ACameraCaptureSession_stateCallbacks sessionStateCallbacks {
@@ -153,6 +163,62 @@ static ACameraCaptureSession_stateCallbacks sessionStateCallbacks {
         .onReady = onSessionReady,
         .onClosed = onSessionClosed
 };
+
+
+/**
+ * Image reader setup. If you want to use AImageReader, enable this in CMakeLists.txt.
+ */
+
+#ifdef WITH_IMAGE_READER
+static void imageCallback(void* context, AImageReader* reader)
+{
+    AImage *image = nullptr;
+    auto status = AImageReader_acquireNextImage(reader, &image);
+    LOGD("imageCallback()");
+    // Check status here ...
+
+    // Try to process data without blocking the callback
+    std::thread processor([=](){
+
+        uint8_t *data = nullptr;
+        int len = 0;
+        AImage_getPlaneData(image, 0, &data, &len);
+
+        // Process data here
+        // ...
+
+        AImage_delete(image);
+    });
+    processor.detach();
+}
+
+AImageReader* createJpegReader()
+{
+    AImageReader* reader = nullptr;
+    media_status_t status = AImageReader_new(640, 480, AIMAGE_FORMAT_JPEG,
+                     4, &reader);
+
+    //if (status != AMEDIA_OK)
+        // Handle errors here
+
+    AImageReader_ImageListener listener{
+            .context = nullptr,
+            .onImageAvailable = imageCallback,
+    };
+
+    AImageReader_setImageListener(reader, &listener);
+
+    return reader;
+}
+
+ANativeWindow* createSurface(AImageReader* reader)
+{
+    ANativeWindow *nativeWindow;
+    AImageReader_getWindow(reader, &nativeWindow);
+
+    return nativeWindow;
+}
+#endif
 
 
 /**
@@ -221,10 +287,52 @@ static void exitCam()
         ACameraManager_delete(cameraManager);
         cameraManager = nullptr;
 
+#ifdef WITH_IMAGE_READER
+        AImageReader_delete(imageReader);
+        imageReader = nullptr;
+#endif
+
         // Capture request for SurfaceTexture
         ANativeWindow_release(textureWindow);
-        ACaptureRequest_free(textureRequest);
+        ACaptureRequest_free(request);
     }
+}
+
+static void initCam(JNIEnv* env, jobject surface)
+{
+    // Prepare surface
+    textureWindow = ANativeWindow_fromSurface(env, surface);
+
+    // Prepare request for texture target
+    ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &request);
+
+    // Prepare outputs for session
+    ACaptureSessionOutput_create(textureWindow, &textureOutput);
+    ACaptureSessionOutputContainer_create(&outputs);
+    ACaptureSessionOutputContainer_add(outputs, textureOutput);
+
+// Enable ImageReader example in CMakeLists.txt. This will additionally
+// make image data available in imageCallback().
+#ifdef WITH_IMAGE_READER
+    imageReader = createJpegReader();
+    imageWindow = createSurface(imageReader);
+    ANativeWindow_acquire(imageWindow);
+    ACameraOutputTarget_create(imageWindow, &imageTarget);
+    ACaptureRequest_addTarget(request, imageTarget);
+    ACaptureSessionOutput_create(imageWindow, &imageOutput);
+    ACaptureSessionOutputContainer_add(outputs, imageOutput);
+#endif
+
+    // Prepare target surface
+    ANativeWindow_acquire(textureWindow);
+    ACameraOutputTarget_create(textureWindow, &textureTarget);
+    ACaptureRequest_addTarget(request, textureTarget);
+
+    // Create the session
+    ACameraDevice_createCaptureSession(cameraDevice, outputs, &sessionStateCallbacks, &textureSession);
+
+    // Start capturing continuously
+    ACameraCaptureSession_setRepeatingRequest(textureSession, &captureCallbacks, 1, &request, nullptr);
 }
 
 static void initSurface(JNIEnv* env, jint texId, jobject surface)
@@ -262,30 +370,11 @@ static void initSurface(JNIEnv* env, jint texId, jobject surface)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf[1]);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_DYNAMIC_DRAW);
 
-
-    // Camera target initialisation
-
-    // Prepare surface
+    // We can use the id to bind to GL_TEXTURE_EXTERNAL_OES
     textureId = texId;
-    textureWindow = ANativeWindow_fromSurface(env, surface);
 
-    // Prepare outputs for session
-    ACaptureSessionOutput_create(textureWindow, &textureOutput);
-    ACaptureSessionOutputContainer_create(&outputs);
-    ACaptureSessionOutputContainer_add(outputs, textureOutput);
-
-    // Create the session
-    ACameraDevice_createCaptureSession(cameraDevice, outputs, &sessionStateCallbacks, &textureSession);
-
-    // Prepare request for texture target
-    ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &textureRequest);
-
-    ANativeWindow_acquire(textureWindow);
-    ACameraOutputTarget_create(textureWindow, &textureTarget);
-    ACaptureRequest_addTarget(textureRequest, textureTarget);
-
-    // Start capturing continuously
-    ACameraCaptureSession_setRepeatingRequest(textureSession, &captureCallbacks, 1, &textureRequest, nullptr);
+    // Prepare the surfaces/targets & initialize session
+    initCam(env, surface);
 }
 
 static void drawFrame(JNIEnv* env, jfloatArray texMatArray)
@@ -377,6 +466,7 @@ Java_eu_sisik_cam_MainActivity_exitCam(JNIEnv *env, jobject)
 JNIEXPORT void JNICALL
 Java_eu_sisik_cam_CamRenderer_onSurfaceCreated(JNIEnv *env, jobject, jint texId, jobject surface)
 {
+    LOGD("onSurfaceCreated()");
     initSurface(env, texId, surface);
 }
 
